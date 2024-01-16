@@ -1,0 +1,446 @@
+version: '3.4'
+
+networks: 
+  shovel-net:
+    external: true
+
+volumes:
+  mysql-datastore:
+  oauth-datastore:
+  logs-datastore:
+  kong-datastore:
+  config:
+
+services:
+  kong-db:
+    image: postgres:9.6
+    container_name: kong-db
+    volumes:
+      - kong-datastore:/var/lib/postgresql/data
+    networks:
+      - shovel-net
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:      kong
+      POSTGRES_USER:     kong
+      POSTGRES_PASSWORD: postsqll123
+
+  kong-migration:
+#    image: daviestobialex/kong-oidc:0.0.4
+    image: kong
+#    container_name: kong-migration
+#    command: "kong migrations bootstrap"
+    command: "kong migrations migrate-apis"
+#    command: "kong migrations up"
+#    command: "kong migrations reset --yes"
+    networks:
+      - shovel-net
+    restart: on-failure
+    environment:
+      KONG_PG_HOST: kong-db
+      KONG_DATABASE:         postgres
+      KONG_PG_PORT:          5432
+      KONG_PG_PASSWORD: postsqll123
+      KONG_PG_DATABASE:      kong
+    links:
+      - kong-db
+    depends_on:
+      - kong-db
+  kong-with-oidc:
+#    image: daviestobialex/kong-oidc:0.0.4
+    image: kong
+    container_name: kong-no-oidc
+#    container_name: kong-with-oidc
+    restart: always
+    depends_on:
+      - kong-db
+    networks:
+      - shovel-net
+    ports:
+      - "8000:8000" # Listener
+      - "8001:8001" # Admin API
+      - "8443:8443" # Listener  (SSL)
+      - "8444:8444" # Admin API (SSL)
+    environment:
+      KONG_DATABASE:         postgres
+      KONG_PG_HOST:          kong-db
+      KONG_PG_PORT:          5432
+      KONG_PG_PASSWORD: postsqll123
+      KONG_PG_DATABASE:      kong
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG:  /dev/stderr
+      KONG_ADMIN_ERROR_LOG:  /dev/stderr
+      KONG_PROXY_LISTEN:     0.0.0.0:8000, 0.0.0.0:8443 ssl
+      KONG_ADMIN_LISTEN:     0.0.0.0:8001, 0.0.0.0:8444 ssl
+      KONG_SSL: "off"
+#      KONG_SSL_CERT: /certs/certificate.crt
+#      KONG_SSL_CERT_KEY: /certs/private.key
+#      KONG_PLUGINS:          bundled,kong-spec-expose,oidc,jwt-keycloak
+    volumes:
+      - /home/ubuntu/ssl/:/certs/
+  konga:
+      image: pantsel/konga
+      container_name: konga
+      environment:
+        # TOKEN_SECRET: ${KONGA_TOKEN_SECRET}
+        DB_ADAPTER: postgres
+        DB_HOST: kong-db
+        DB_PORT: 5432
+        DB_DATABASE: konga
+        DB_USER: kong
+        DB_PASSWORD: postsqll123
+        NODE_ENV: development
+        KONGA_HOOK_TIMEOUT: 10000
+      restart: always
+      ports:
+      - 1337:1337
+      depends_on:
+      - kong-db
+      networks:
+      - shovel-net
+  docker-host:
+    container_name: docker-host
+    image: qoomon/docker-host
+    cap_add: [ 'NET_ADMIN', 'NET_RAW' ]
+    mem_limit: 8M
+    restart: on-failure
+    networks:
+      - shovel-net
+  tcp_message_emitter:
+    container_name: tcp
+    depends_on: [ docker-host ]
+    image: alpine
+    networks:
+      - shovel-net
+    command: [ "sh", "-c", "while :; do date; sleep 1; done | nc 'docker-host' 2323 -v"]
+  udp_message_emitter:
+    container_name: udp
+    depends_on: [ docker-host ]
+    image: alpine
+    networks:
+      - shovel-net
+    command: [ "sh", "-c", "while :; do date; sleep 1; done | nc 'docker-host' 5353 -u -v"]
+  oauth-db:
+    image: postgres:9.6
+    container_name: oauth-db
+    restart: always
+    volumes:
+      - oauth-datastore:/var/lib/postgresql/data
+    networks:
+      - shovel-net
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:      kong
+      POSTGRES_USER:     kong
+      POSTGRES_PASSWORD: postsqll123
+  keycloak: 
+      image: quay.io/keycloak/keycloak:legacy
+      container_name: fineract-oauth-security 
+      environment:
+        DB_VENDOR: POSTGRES
+        DB_ADDR: oauth-db
+        DB_DATABASE: postgres
+        DB_USER: kong
+        DB_SCHEMA: public
+        DB_PASSWORD: postsqll123
+        KEYCLOAK_USER: admin
+        KEYCLOAK_PASSWORD: admin
+      volumes:
+        - /home/ubuntu/ssl/combined_certificate.crt:/etc/x509/https/tls.crt
+        - /home/ubuntu/ssl/private.key:/etc/x509/https/tls.key
+      depends_on:
+        - oauth-db
+      ports:
+      - 9000:8080
+      - 9990:9990
+      - 8553:8443
+      networks:
+      - shovel-net
+  # Backend service
+  fineractmysql:
+    image: mysql
+    container_name: fineractmysql
+    volumes:
+      - ./fineract-db/server_collation.cnf:/etc/mysql/conf.d/server_collation.cnf
+      - ./fineract-db/docker:/docker-entrypoint-initdb.d:Z,ro
+    restart: always
+    networks:
+      - shovel-net
+    environment:
+      MYSQL_ROOT_PASSWORD: skdcnwauicn2ucnaecasdsajdnizucawencascdca
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "185.219.134.240", "--password=skdcnwauicn2ucnaecasdsajdnizucawencascdca" ]
+      timeout: 10s
+      retries: 10
+    ports:
+      - "3308:3306"
+  fineract-server:
+    image: daviestobialex/shovel:apache-fineract
+#    image: fineract-with-report
+    container_name: fineract-server-report
+    #build:
+      #context: .
+      #target: fineract
+    restart: always
+#    network_mode: "host"
+#    extra_hosts:
+#      - "185.219.134.240:docker-host"
+    ports:
+      - 8811:8811
+#    depends_on:
+#      - fineractmysql
+    # volumes:
+      # - /home/ubuntu/ssl/:/ssl/
+    networks:
+      - shovel-net
+    environment:
+      - DRIVERCLASS_NAME=com.mysql.jdbc.Driver
+      # TODO: env vars prefixed with "fineract_tenants_*" will be removed with one of the next releases
+      #- fineract_tenants_driver=org.mariadb.jdbc.Driver
+      #- fineract_tenants_url=jdbc:mariadb://fineractmysql:3306/fineract_tenants
+      #- fineract_tenants_uid=root
+      #- fineract_tenants_pwd=skdcnwauicn2ucnaecasdsajdnizucawencascdca
+      # NOTE: node aware scheduler
+      - FINERACT_NODE_ID=1
+      # NOTE: env vars prefixed "FINERACT_HIKARI_*" are used to configure the database connection pool
+      # - FINERACT_HIKARI_DRIVER_SOURCE_CLASS_NAME=org.mariadb.jdbc.Driver
+      - FINERACT_HIKARI_DRIVER_SOURCE_CLASS_NAME=com.mysql.jdbc.Driver
+      - FINERACT_HIKARI_JDBC_URL=jdbc:mysql://185.219.134.240:3306/fineract_tenants
+      - FINERACT_HIKARI_USERNAME=shoveltenant
+      - FINERACT_HIKARI_PASSWORD=7fNWA3M44AsL2X2e
+      # ... following variables are optional; "application.properties" contains reasonable defaults (same as here)
+      - FINERACT_HIKARI_MINIMUM_IDLE=3
+      - FINERACT_HIKARI_MAXIMUM_POOL_SIZE=10
+      - FINERACT_HIKARI_IDLE_TIMEOUT=60000
+      - FINERACT_HIKARI_CONNECTION_TIMEOUT=20000
+      - FINERACT_HIKARI_TEST_QUERY=SELECT 1
+      - FINERACT_HIKARI_AUTO_COMMIT=true
+      - FINERACT_HIKARI_DS_PROPERTIES_CACHE_PREP_STMTS=true
+      - FINERACT_HIKARI_DS_PROPERTIES_PREP_STMT_CACHE_SIZE=250
+      - FINERACT_HIKARI_DS_PROPERTIES_PREP_STMT_CACHE_SQL_LIMIT=2048
+      - FINERACT_HIKARI_DS_PROPERTIES_USE_SERVER_PREP_STMTS=true
+      - FINERACT_HIKARI_DS_PROPERTIES_USE_LOCAL_SESSION_STATE=true
+      - FINERACT_HIKARI_DS_PROPERTIES_REWRITE_BATCHED_STATEMENTS=true
+      - FINERACT_HIKARI_DS_PROPERTIES_CACHE_RESULT_SET_METADATA=true
+      - FINERACT_HIKARI_DS_PROPERTIES_CACHE_SERVER_CONFIGURATION=true
+      - FINERACT_HIKARI_DS_PROPERTIES_ELIDE_SET_AUTO_COMMITS=true
+      - FINERACT_HIKARI_DS_PROPERTIES_MAINTAIN_TIME_STATS=false
+      - FINERACT_HIKARI_DS_PROPERTIES_LOG_SLOW_QUERIES=true
+      - FINERACT_HIKARI_DS_PROPERTIES_DUMP_QUERIES_IN_EXCEPTION=true
+      # NOTE: env vars prefixed "FINERACT_DEFAULT_TENANTDB_*" are used to create the default tenant database
+      - FINERACT_DEFAULT_TENANTDB_HOSTNAME=185.219.134.240
+      - FINERACT_DEFAULT_TENANTDB_PORT=3306
+      - FINERACT_DEFAULT_TENANTDB_UID=shovelfineractdefault
+      - FINERACT_DEFAULT_TENANTDB_PWD=4FFETTKKHtfyf4bM
+      - FINERACT_DEFAULT_TENANTDB_CONN_PARAMS=
+      - FINERACT_DEFAULT_TENANTDB_TIMEZONE=Asia/Kolkata
+      - FINERACT_DEFAULT_TENANTDB_IDENTIFIER=default
+      - FINERACT_DEFAULT_TENANTDB_NAME=fineract_default
+      - FINERACT_DEFAULT_TENANTDB_DESCRIPTION=Default Corebank Tenant
+      - JAVA_TOOL_OPTIONS="-Xmx1G"
+      - FINERACT_SERVER_SSL_ENABLED=true
+      - FINERACT_SERVER_PORT=8811
+      # - FINERACT_SERVER_SSL_KEY_STORE=/ssl/monypot.jks
+      # - FINERACT_SERVER_SSL_KEY_STORE_PASSWORD=POKPRODL0v3A9PS
+      # - FINERACT_SECURITY_OAUTH_ENABLED=false
+      # - FINERACT_SECURITY_BASICAUTH_ENABLED=true
+      # - FINERACT_SERVER_OAUTH_RESOURCE_URL=https://dev.monypot.com:8553/auth/realms/fineract
+      # - FINERACT_SERVER_OAUTH_RESOURCE_URL=https://fineract-oauth-security:8443/auth/realms/fineract
+
+  # Frontend service
+  community-app:
+    image: daviestobialex/shovel:mifos 
+#    image: mifos-latest-v2
+    container_name: mifos-ui
+#    network_mode: "host"
+    restart: always
+    networks:
+      - shovel-net
+    ports:
+      - 4200:80
+  # Shovel Service
+  shovel-db:
+    image: mysql:latest
+    container_name: shovel-db
+    volumes:
+      - mysql-datastore:/var/lib/mysql
+    networks:
+      - shovel-net
+    ports:
+      - "3307:3307"
+    environment:
+      MYSQL_DATABASE: shovel
+      #MYSQL_USER: root
+      MYSQL_ROOT_PASSWORD: shovel
+      MYSQL_ROOT_HOST: '%'
+      MYSQL_TCP_PORT: 3307
+    restart: always
+  wallet:
+    image: daviestobialex/shovel:fineract-integration
+#    image: fineract-integration
+    container_name: shovel-wallet
+#    network_mode: "host"
+    depends_on:
+#      - redis
+#      - shovel-db
+      - fineract-server
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+    ports:
+      - "5995:5995"
+    restart: always
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://185.219.134.240:3306/wallet?allowPublicKeyRetrieval=true&useSSL=false&useUnicode=true&useJDBCCompliantTimezoneShift=true&useLegacyDatetimeCode=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: wallet
+      SPRING_DATASOURCE_PASSWORD: HXLTXiBwiRDBmwbn
+      WALLET_URL: https://fineract-server-report:8811/fineract-provider/api/v1
+      WALLET_PASSWORD: password
+      WALLET_USERNAME: mifos
+      SPRING_LOG_LEVEL: info
+      REDIS_IP: redis-docker
+      REDIS_PORT: 6379
+#      REDIS_PASSWORD: CongoRedis
+  gateway:
+#    image: daviestobialex/shovel-congo:gateway
+    image: gateway
+    container_name: shovel-gateway
+    depends_on:
+      - shovel-db
+#    networks:
+#      - host
+    volumes:
+      - /root/shovel/logs/gatway:/logs
+    ports:
+      - "8333:8333"
+    restart: always
+  account:
+    image: daviestobialex/shovel-congo:account
+    container_name: shovel-account
+    depends_on:
+      - shovel-db
+      - redis
+      - gateway
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+    ports:
+      - "84:84"
+    restart: always
+  redis:
+    image: redis:6.2-alpine
+    #build: redis
+    container_name: redis-docker
+    restart: always
+    networks:
+      - shovel-net
+    ports:
+      - 6379:6379
+    command: redis-server --save 60 1 --loglevel warning
+  nqr:
+    image: daviestobialex/nqr:1.0.0
+    container_name: shovel-nqr
+    depends_on:
+      - shovel-db
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+    ports:
+      - "1881:1881"
+    environment:
+      MYSQL_HOST: shovel-db
+      MYSQL_USER: root
+      MYSQL_DB: shovel
+      MYSQL_PASSWORD: shovel
+      MYSQL_PORT: 3307
+    restart: always
+  easypay:
+    image: daviestobialex/easypay:1.0.0
+    container_name: shovel-easypay
+#    depends_on:
+#      - shovel-db
+#    network_mode: "host"
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+    ports:
+      - "1882:1882"
+    restart: always
+    environment:
+      MYSQL_HOST: 185.219.134.240
+      MYSQL_USER: easypayuser
+      MYSQL_DB: easypay
+      MYSQL_PASS: ecHf7BmhpRedaMw8
+      MYSQL_PORT: 3306
+      BASE_URL: https://api.nibss-plc.com.ng/nipservice/v1/nip
+      TOKEN_BASE_URL: https://api.nibss-plc.com.ng/reset
+  nip-outward:
+    image: daviestobialex/shovel:nip-outward
+#    image: fineract-integration
+    container_name: nip-outward
+    depends_on:
+      - shovel-db
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+        #- config:/config
+    ports:
+      - "8899:8899"
+    restart: always
+    environment:
+      MYSQL_HOST: 185.219.134.240
+      MYSQL_USER: nipoutward
+      MYSQL_DB: nipoutward
+      MYSQL_PASS: 5EFPGzjEHmwteD68
+      MYSQL_PORT: 3306
+  nip-inward:
+    image: daviestobialex/shovel:nip-inward
+#    image: fineract-integration
+    container_name: nip-inward
+    depends_on:
+      - shovel-db
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+    ports:
+      - "8010:8010"
+    restart: always
+    environment:
+      MYSQL_HOST: 185.219.134.240
+      MYSQL_USER: nipinward
+      MYSQL_DB: nipinward
+      MYSQL_PASS: SMHnPZaaridMFJsT
+      MYSQL_PORT: 3306
+      WALLET_URL: http://shovel-wallet:5995/api/savings
+  nip-bvn-validation:
+    image: daviestobialex/shovel:nip-bvn-validation
+#    image: fineract-integration
+    container_name: nip-bvn-validation
+    networks:
+      - shovel-net
+    volumes:
+      - logs-datastore:/logs
+    ports:
+      - "5995:5995"
+    restart: always
+    environment:
+      BVN_CODE: 920
+  # log management
+  dozzle:
+    container_name: dozzle-shovel
+    image: amir20/dozzle:latest
+    networks:
+      - shovel-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - 9912:8080
