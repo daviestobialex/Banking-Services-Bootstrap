@@ -261,6 +261,21 @@ services:
       - shovel-net
     ports:
       - 4200:80
+  web-app:
+    image: openmf/web-app:master
+    restart: always
+    environment:
+      - FINERACT_API_URLS=https://dev.tsanyawamfb.com.ng
+      - FINERACT_API_URL=https://dev.tsanyawamfb.com.ng
+      - FINERACT_API_PROVIDER=/fineract-provider/api
+      - FINERACT_API_VERSION=/v1
+      - FINERACT_PLATFORM_TENANT_IDENTIFIER=default
+      - MIFOS_DEFAULT_LANGUAGE=en-US
+      - MIFOS_SUPPORTED_LANGUAGES=cs-CS,de-DE,en-US,es-MX,fr-FR,it-IT,ko-KO,li-LI,lv-LV,ne-NE,pt-PT,sw-SW
+      - MIFOS_PRELOAD_CLIENTS=true
+      - MIFOS_DEFAULT_CHAR_DELIMITER=,
+    ports:
+      - 80:4201
   # Shovel Service
   shovel-db:
     image: mysql:latest
